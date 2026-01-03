@@ -1,128 +1,120 @@
 import gradio as gr
+import requests
 from dotenv import load_dotenv
 from crewai import Agent, Task, Crew
+from crewai.tools import tool
 import os
 
 load_dotenv(override=True)
 
-# Agents
+MARKETAUX_API_KEY = os.getenv("MARKETAUX_API_KEY")
+
+# =========================
+# TOOL: REAL MARKET NEWS
+# =========================
+
+@tool
+def fetch_market_news(stock_symbol: str) -> str:
+    """
+    Fetch real, recent market news for a stock symbol using MarketAux API.
+    """
+    url = "https://api.marketaux.com/v1/news/all"
+    params = {
+        "symbols": stock_symbol,
+        "language": "en",
+        "limit": 5,
+        "api_token": MARKETAUX_API_KEY
+    }
+
+    response = requests.get(url, params=params, timeout=10)
+    response.raise_for_status()
+
+    data = response.json().get("data", [])
+
+    if not data:
+        return "No recent news found."
+
+    news_text = []
+    for item in data:
+        news_text.append(
+            f"- {item.get('title')} ({item.get('source')})"
+        )
+
+    return "\n".join(news_text)
+
+# =========================
+# AGENTS
+# =========================
+
 news_agent = Agent(
     role="Market News Analyst",
-    goal="Analyze stock from market news and sentiment perspective",
-    backstory="Expert in market sentiment analysis with deep understanding of news impact on stock prices",
+    goal="Analyze stock using real market news",
+    backstory="You analyze only provided news data. You never invent events.",
+    tools=[fetch_market_news],
     llm="gpt-4o-mini",
     verbose=True
 )
 
 financial_agent = Agent(
-    role="Financial Analyst", 
-    goal="Analyze stock from financial metrics and fundamentals perspective",
-    backstory="CFA with expertise in financial statement analysis and valuation models",
+    role="Financial Analyst",
+    goal="Provide high-level financial reasoning without fabricating numbers",
+    backstory="You reason qualitatively unless verified data is provided.",
     llm="gpt-4o-mini",
     verbose=True
 )
 
-sector_agent = Agent(
-    role="Sector & Competition Analyst",
-    goal="Analyze stock from competitive landscape and sector prospects perspective", 
-    backstory="Industry expert specializing in competitive analysis and sector trends",
-    llm="gpt-4o-mini",
-    verbose=True
-)
+# =========================
+# MAIN FUNCTION
+# =========================
 
-review_agent = Agent(
-    role="Senior Investment Analyst",
-    goal="Critically review all analyses and provide comprehensive investment summary",
-    backstory="Senior analyst with 15+ years experience in synthesizing complex investment research",
-    llm="gpt-4o-mini",
-    verbose=True
-)
-
-def analyze_stock(stock_symbol, company_name=""):
+def analyze_stock(stock_symbol: str):
     if not stock_symbol:
-        return "Please enter a stock symbol"
-    
-    # Create company identifier
-    company_id = f"{company_name} ({stock_symbol})" if company_name else stock_symbol
-    
-    # Tasks
+        return "Please enter a stock symbol."
+
+    # ---- Tasks ----
+
     news_task = Task(
-        description=f"Analyze {company_id} from market news and sentiment perspective. Research recent news, market sentiment, analyst ratings, and media coverage impact on stock performance.",
-        expected_output="Market news analysis with sentiment assessment and news impact evaluation",
+        description=(
+            f"Use the tool to fetch REAL news for {stock_symbol}.\n"
+            "Summarize sentiment based ONLY on that news.\n"
+            "Do not add external facts."
+        ),
+        expected_output="News-based sentiment analysis grounded in fetched headlines",
         agent=news_agent
     )
-    
-    financial_task = Task(
-        description=f"Analyze {company_id} from financial fundamentals perspective. Evaluate key financial metrics, ratios, earnings trends, revenue growth, profitability, and valuation.",
-        expected_output="Financial analysis with key metrics, ratios, and valuation assessment",
+
+    finance_task = Task(
+        description=(
+            f"Provide a QUALITATIVE financial perspective on {stock_symbol}.\n"
+            "If numbers are unknown, explicitly say so."
+        ),
+        expected_output="High-level financial reasoning with uncertainty",
         agent=financial_agent
     )
-    
-    sector_task = Task(
-        description=f"Analyze {company_id} from competitive and sector perspective. Research industry trends, competitive positioning, market share, and sector growth prospects.",
-        expected_output="Competitive and sector analysis with industry positioning assessment",
-        agent=sector_agent
-    )
-    
-    review_task = Task(
-        description="Critically review all previous analyses and synthesize findings into a comprehensive investment summary with clear recommendations.",
-        expected_output="Critical review and investment recommendation with risk assessment",
-        agent=review_agent,
-        context=[news_task, financial_task, sector_task]
-    )
-    
-    # Create and run crew
+
     crew = Crew(
-        agents=[news_agent, financial_agent, sector_agent, review_agent],
-        tasks=[news_task, financial_task, sector_task, review_task],
+        agents=[news_agent, financial_agent],
+        tasks=[news_task, finance_task],
         verbose=True
     )
-    
-    try:
-        result = crew.kickoff()
-        return str(result)
-    except Exception as e:
-        return f"Analysis failed: {str(e)}\n\nNote: This demo requires API keys for full functionality."
 
-# Gradio Interface
-with gr.Blocks(title="Stock Analysis Crew") as demo:
-    gr.Markdown("#Stock Analysis Crew")
-    gr.Markdown("Multi-agent stock analysis using CrewAI with market news, financial, and sector perspectives")
-    
-    with gr.Row():
-        with gr.Column(scale=1):
-            stock_input = gr.Textbox(
-                label="Stock Symbol",
-                placeholder="e.g., AAPL, TSLA, MSFT",
-                value="AAPL"
-            )
-            company_input = gr.Textbox(
-                label="Company Name (Optional)",
-                placeholder="e.g., Apple Inc."
-            )
-            analyze_btn = gr.Button("Analyze Stock", variant="primary")
-        
-        with gr.Column(scale=2):
-            output = gr.Textbox(
-                label="Analysis Results",
-                lines=20,
-                max_lines=30,
-                show_copy_button=True
-            )
-    
-    analyze_btn.click(
-        fn=analyze_stock,
-        inputs=[stock_input, company_input],
-        outputs=output
+    return str(crew.kickoff())
+
+# =========================
+# GRADIO UI
+# =========================
+
+with gr.Blocks(title="Stock Analysis") as demo:
+    gr.Markdown("#Stock Analysis")
+    gr.Markdown(
+        "Uses **real market news via MarketAux** combined with qualitative analysis."
     )
-    
-    gr.Markdown("""
-    ### Agent Roles:
-    - **Market News Analyst**: Analyzes market sentiment and news impact
-    - **Financial Analyst**: Evaluates financial metrics and fundamentals  
-    - **Sector Analyst**: Assesses competitive landscape and industry trends
-    - **Senior Analyst**: Reviews all inputs and provides investment summary
-    """)
+
+    stock = gr.Textbox(label="Stock Symbol", value="AAPL")
+    run = gr.Button("Analyze")
+    output = gr.Textbox(lines=25, show_copy_button=True)
+
+    run.click(analyze_stock, stock, output)
 
 if __name__ == "__main__":
     demo.launch()
